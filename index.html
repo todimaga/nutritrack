@@ -98,6 +98,81 @@
       font-size: 12px;
       color: var(--text2);
       font-family: 'DM Mono', monospace;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      user-select: none;
+    }
+    .app-date:active { opacity: .7; }
+    .date-nav-arrow { font-size: 14px; color: var(--text3); }
+
+    /* Day picker bottom sheet */
+    #dayPickerOverlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,.55);
+      z-index: 100;
+      backdrop-filter: blur(2px);
+    }
+    #dayPickerSheet {
+      position: absolute;
+      bottom: 0; left: 0; right: 0;
+      background: var(--bg2);
+      border-radius: 20px 20px 0 0;
+      padding: 0 0 calc(var(--safe-bottom) + 16px);
+      max-height: 70vh;
+      display: flex;
+      flex-direction: column;
+    }
+    .sheet-handle {
+      width: 36px; height: 4px;
+      background: var(--border2);
+      border-radius: 2px;
+      margin: 12px auto 0;
+      flex-shrink: 0;
+    }
+    .sheet-title {
+      font-size: 11px; font-weight: 500;
+      letter-spacing: .1em; text-transform: uppercase;
+      color: var(--text3); font-family: 'DM Mono', monospace;
+      padding: 14px 20px 10px;
+      flex-shrink: 0;
+    }
+    #dayList {
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      flex: 1;
+    }
+    .day-pick-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 13px 20px;
+      border-bottom: 0.5px solid var(--border);
+      cursor: pointer;
+      transition: background .12s;
+    }
+    .day-pick-item:active { background: var(--bg3); }
+    .day-pick-item.is-today .dpi-label { color: var(--green-text); }
+    .day-pick-item.is-selected { background: var(--bg3); }
+    .dpi-label { font-size: 14px; font-weight: 500; color: var(--text); font-family: 'DM Mono', monospace; }
+    .dpi-sub   { font-size: 11px; color: var(--text3); font-family: 'DM Mono', monospace; }
+    .dpi-kcal  { font-size: 12px; color: var(--text2); font-family: 'DM Mono', monospace; }
+
+    /* Past-day read-only banner */
+    #pastBanner {
+      display: none;
+      background: var(--amber-bg);
+      border: 0.5px solid var(--amber);
+      border-radius: var(--radius-sm);
+      padding: 8px 14px;
+      font-size: 12px;
+      color: var(--amber);
+      margin-bottom: 16px;
+      text-align: center;
+      font-family: 'DM Mono', monospace;
     }
 
     #tabs {
@@ -690,9 +765,22 @@
     <div id="header">
       <div class="header-left">
         <div class="app-name">NutriTrack</div>
-        <div class="app-date" id="headerDate">—</div>
+        <div class="app-date" id="headerDate" onclick="openDayPicker()">
+          <span class="date-nav-arrow" id="navPrev">‹</span>
+          <span id="headerDateText">—</span>
+          <span class="date-nav-arrow" id="navNext">›</span>
+        </div>
       </div>
-      <button class="reset-link" onclick="resetDay()">azzera pasti</button>
+      <button class="reset-link" id="resetBtn" onclick="resetDay()">azzera pasti</button>
+    </div>
+
+    <!-- Day picker bottom sheet -->
+    <div id="dayPickerOverlay" onclick="closeDayPicker(event)">
+      <div id="dayPickerSheet">
+        <div class="sheet-handle"></div>
+        <div class="sheet-title">seleziona giorno</div>
+        <div id="dayList"></div>
+      </div>
     </div>
 
     <div id="tabs">
@@ -711,6 +799,7 @@
           <button class="day-btn" id="btn-free" onclick="setDay('free')">Libera</button>
         </div>
 
+        <div id="pastBanner">📅 Giorno passato · sola lettura</div>
         <div id="trackingSection">
 
           <div class="import-panel">
@@ -864,18 +953,113 @@
       return { kcal: k, prot: Math.round(k * MACROR.prot / 4), carb: Math.round(k * MACROR.carb / 4), fat: Math.round(k * MACROR.fat / 9) };
     }
 
-    let dayType = localStorage.getItem('nt_day') || 'training';
-    let meals = JSON.parse(localStorage.getItem('nt_meals') || '[]');
+    // ── Date helpers ──────────────────────────────────────────────
+    function toKey(d) { // d = Date object → 'YYYY-MM-DD'
+      return d.toISOString().slice(0, 10);
+    }
+    function todayKey() { return toKey(new Date()); }
+
+    // viewDate is the date currently shown (Date object, always midnight local)
+    let viewDate = new Date();
+    viewDate.setHours(0,0,0,0);
+
+    function isToday() { return toKey(viewDate) === todayKey(); }
+
+    function keyForDate(d) { return toKey(d); }
+
+    // ── Per-day storage ───────────────────────────────────────────
+    function loadDayData(d) {
+      const k = keyForDate(d);
+      // Migrate legacy data (no date suffix) into today's slot on first load
+      if (k === todayKey() && !localStorage.getItem('nt_meals_' + k)) {
+        const legacy = localStorage.getItem('nt_meals');
+        if (legacy && legacy !== '[]') localStorage.setItem('nt_meals_' + k, legacy);
+        const legacyDay = localStorage.getItem('nt_day');
+        if (legacyDay) localStorage.setItem('nt_day_' + k, legacyDay);
+      }
+      return {
+        meals:   JSON.parse(localStorage.getItem('nt_meals_' + k) || '[]'),
+        dayType: localStorage.getItem('nt_day_' + k) || 'training'
+      };
+    }
+
+    function saveDayData() {
+      const k = keyForDate(viewDate);
+      localStorage.setItem('nt_meals_' + k,   JSON.stringify(meals));
+      localStorage.setItem('nt_day_' + k,     dayType);
+      localStorage.setItem('nt_weights',       JSON.stringify(weights));
+    }
+
+    let { meals, dayType } = loadDayData(viewDate);
     let weights = JSON.parse(localStorage.getItem('nt_weights') || '[]');
 
-    function save() {
-      localStorage.setItem('nt_day', dayType);
-      localStorage.setItem('nt_meals', JSON.stringify(meals));
-      localStorage.setItem('nt_weights', JSON.stringify(weights));
+    function save() { saveDayData(); }
+
+    // ── Nav helpers ───────────────────────────────────────────────
+    function shiftDay(delta) {
+      const d = new Date(viewDate);
+      d.setDate(d.getDate() + delta);
+      if (d > new Date()) return; // no future
+      viewDate = d;
+      const data = loadDayData(viewDate);
+      meals   = data.meals;
+      dayType = data.dayType;
+      render();
     }
+
+    // Intercept arrow clicks without opening the picker
+    document.getElementById('navPrev').addEventListener('click', e => { e.stopPropagation(); shiftDay(-1); });
+    document.getElementById('navNext').addEventListener('click', e => { e.stopPropagation(); shiftDay(+1); });
+
+    // ── Day picker ────────────────────────────────────────────────
+    window.openDayPicker = function() {
+      const overlay = document.getElementById('dayPickerOverlay');
+      const list    = document.getElementById('dayList');
+      overlay.style.display = 'block';
+
+      const today = new Date(); today.setHours(0,0,0,0);
+      let html = '';
+      for (let i = 0; i < 30; i++) {
+        const d = new Date(today);
+        d.setDate(d.getDate() - i);
+        const k = keyForDate(d);
+        const isT = i === 0;
+        const isSel = toKey(d) === toKey(viewDate);
+        const dayMeals = JSON.parse(localStorage.getItem('nt_meals_' + k) || '[]');
+        const kcal = Math.round(dayMeals.reduce((s,m) => s+m.kcal, 0));
+        const label = d.toLocaleDateString('it-IT', { weekday: 'short', day: 'numeric', month: 'short' });
+        html += `<div class="day-pick-item${isT?' is-today':''}${isSel?' is-selected':''}" onclick="pickDay('${k}')">
+          <div>
+            <div class="dpi-label">${label}${isT ? ' · oggi' : ''}</div>
+            <div class="dpi-sub">${kcal > 0 ? kcal + ' kcal' : 'nessun pasto'}</div>
+          </div>
+        </div>`;
+      }
+      list.innerHTML = html;
+      // Scroll selected into view
+      requestAnimationFrame(() => {
+        const sel = list.querySelector('.is-selected');
+        if (sel) sel.scrollIntoView({ block: 'nearest' });
+      });
+    };
+
+    window.closeDayPicker = function(e) {
+      if (e && e.target !== document.getElementById('dayPickerOverlay')) return;
+      document.getElementById('dayPickerOverlay').style.display = 'none';
+    };
+
+    window.pickDay = function(k) {
+      document.getElementById('dayPickerOverlay').style.display = 'none';
+      viewDate = new Date(k + 'T00:00:00');
+      const data = loadDayData(viewDate);
+      meals   = data.meals;
+      dayType = data.dayType;
+      render();
+    };
 
     // Public API for adding meals from external sources (Claude)
     window.addMeal = function (name, kcal, prot, carb, fat, group) {
+      if (!isToday()) return; // read-only for past days
       group = group || 'snack';
       meals.push({
         name, kcal, prot, carb, fat, group, id: Date.now(),
@@ -887,10 +1071,12 @@
     window.setDay = function (t) { dayType = t; save(); render(); };
 
     window.resetDay = function () {
+      if (!isToday()) return;
       if (confirm('Azzera tutti i pasti di oggi?')) { meals = []; save(); render(); }
     };
 
     window.deleteMeal = function (id) {
+      if (!isToday()) return;
       meals = meals.filter(m => m.id !== id); save(); render();
     };
 
@@ -919,8 +1105,15 @@
 
     function render() {
       // Header date
-      document.getElementById('headerDate').textContent =
-        new Date().toLocaleDateString('it-IT', { weekday: 'long', day: 'numeric', month: 'long' });
+      const isT = isToday();
+      const dateStr = viewDate.toLocaleDateString('it-IT', { weekday: 'long', day: 'numeric', month: 'long' });
+      document.getElementById('headerDateText').textContent = isT ? dateStr : dateStr;
+      document.getElementById('navNext').style.visibility = isT ? 'hidden' : 'visible';
+
+      // Past-day banner + read-only UI
+      document.getElementById('pastBanner').style.display   = isT ? 'none' : 'block';
+      document.getElementById('resetBtn').style.display     = isT ? '' : 'none';
+      document.getElementById('importHint') && (document.querySelector('.import-panel').style.display = isT ? '' : 'none');
 
       const t = calcT(dayType);
 
@@ -1025,7 +1218,7 @@
                   <div class="meal-kcal-val">${Math.round(m.kcal)}</div>
                   <div class="meal-kcal-lbl">kcal</div>
                 </div>
-                <button class="del-btn" onclick="deleteMeal(${m.id})">×</button>
+                ${isT ? `<button class="del-btn" onclick="deleteMeal(${m.id})">×</button>` : ''}
               </div>
             </div>`).join('')}
         </div>`;
